@@ -75,16 +75,23 @@ defmodule Mongo.Auth.SCRAM do
   end
 
   defp generate_proof(salted_password, auth_message, digest) do
-    client_key   = :crypto.hmac(digest, salted_password, "Client Key")
+    client_key   = hmac(digest, salted_password, "Client Key")
     stored_key   = :crypto.hash(digest, client_key)
-    signature    = :crypto.hmac(digest, stored_key, auth_message)
+    signature    = hmac(digest, stored_key, auth_message)
     client_proof = xor_keys(client_key, signature, "")
     "p=#{Base.encode64(client_proof)}"
   end
 
   defp generate_signature(salted_password, auth_message, digest) do
-    server_key = :crypto.hmac(digest, salted_password, "Server Key")
-    :crypto.hmac(digest, server_key, auth_message)
+    server_key = hmac(digest, salted_password, "Server Key")
+    hmac(digest, server_key, auth_message)
+  end
+
+  defp hmac(digest, key, data) do
+    case Kernel.function_exported?(:crypto, :mac, 3) do
+      true -> :crypto.mac(:hmac, digest, key, data)
+      false -> :crypto.hmac(digest, key, data)
+    end
   end
 
   defp xor_keys("", "", result), do: result
