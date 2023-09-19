@@ -11,6 +11,7 @@ defmodule Mongo.Auth.PLAIN do
 
     result = Utils.command(-3, message, s)
     IO.puts("[PLAIN]: result=#{inspect(result)}")
+
     case result do
       {:ok, _flags, %{"ok" => ok, "conversationId" => _, "done" => true, "payload" => %BSON.Binary{binary: ""}}} when ok == 1 ->
         :ok
