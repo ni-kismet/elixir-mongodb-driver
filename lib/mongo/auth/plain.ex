@@ -3,7 +3,7 @@ defmodule Mongo.Auth.PLAIN do
   alias Mongo.MongoDBConnection.Utils
 
   def auth({username, password}, db, s) do
-    auth_payload = build_plain_auth_payload(username, password)
+    auth_payload = build_auth_payload(username, password)
     message = [saslStart: 1, mechanism: "PLAIN", payload: auth_payload]
 
     case Utils.command(-3, message, s) do
@@ -18,7 +18,7 @@ defmodule Mongo.Auth.PLAIN do
     end
   end
 
-  defp build_plain_auth_payload(username, password) do
+  defp build_auth_payload(username, password) do
     # https://www.ietf.org/rfc/rfc4616.txt
     # Null separate listed of authorization ID (blank), username, password. These are sent as raw UTF-8.
     payload = "\0#{username}\0#{password}"
