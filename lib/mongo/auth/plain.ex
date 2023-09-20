@@ -2,7 +2,11 @@ defmodule Mongo.Auth.PLAIN do
   @moduledoc false
   alias Mongo.MongoDBConnection.Utils
 
-  def auth({username, password}, db, s) do
+  def auth({nil, nil}, _db, _s) do
+    :ok
+  end
+
+  def auth({username, password}, _db, s) do
     auth_payload = build_auth_payload(username, password)
     message = [saslStart: 1, mechanism: "PLAIN", payload: auth_payload]
 
