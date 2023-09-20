@@ -11,7 +11,7 @@ defmodule Mongo.Auth.PLAIN do
     message = [saslStart: 1, mechanism: "PLAIN", payload: auth_payload]
 
     case Utils.command(-3, message, s) do
-      {:ok, _flags, %{"ok" => ok, "conversationId" => _, "done" => true, "payload" => %BSON.Binary{binary: ""}}} when ok == 1 ->
+      {:ok, _flags, %{"ok" => ok, "done" => true}} when ok == 1 ->
         :ok
 
       {:ok, _flags, %{"ok" => ok, "errmsg" => reason, "code" => code}} when ok == 0 ->
