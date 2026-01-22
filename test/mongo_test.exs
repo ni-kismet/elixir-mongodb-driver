@@ -223,7 +223,7 @@ defmodule Mongo.Test do
     assert {:ok, _} = Mongo.insert_one(c.pid, coll, %{foo: 42, bar: 1})
 
     # defaults
-    assert {:ok, value} = Mongo.find_one_and_update(c.pid, coll, %{"foo" => 42}, %{"$set" => %{bar: 2}})
+    assert {:ok, %Mongo.FindAndModifyResult{value: value}} = Mongo.find_one_and_update(c.pid, coll, %{"foo" => 42}, %{"$set" => %{bar: 2}})
     assert %{"bar" => 1} = value, "Should return original document by default"
 
     # should raise if we don't have atomic operators
@@ -232,31 +232,31 @@ defmodule Mongo.Test do
     end
 
     # return_document = :after
-    assert {:ok, value} = Mongo.find_one_and_update(c.pid, coll, %{"foo" => 42}, %{"$set" => %{bar: 3}}, return_document: :after)
+    assert {:ok, %Mongo.FindAndModifyResult{value: value}} = Mongo.find_one_and_update(c.pid, coll, %{"foo" => 42}, %{"$set" => %{bar: 3}}, return_document: :after)
     assert %{"bar" => 3} = value, "Should return modified doc"
 
     # projection
-    assert {:ok, value} = Mongo.find_one_and_update(c.pid, coll, %{"foo" => 42}, %{"$set" => %{bar: 3}}, projection: %{"bar" => 1})
+    assert {:ok, %Mongo.FindAndModifyResult{value: value}} = Mongo.find_one_and_update(c.pid, coll, %{"foo" => 42}, %{"$set" => %{bar: 3}}, projection: %{"bar" => 1})
     assert Map.get(value, "foo") == nil, "Should respect the projection"
 
     # sort
     assert {:ok, _} = Mongo.insert_one(c.pid, coll, %{foo: 42, bar: 10})
-    assert {:ok, value} = Mongo.find_one_and_update(c.pid, coll, %{"foo" => 42}, %{"$set" => %{baz: 1}}, sort: %{"bar" => -1}, return_document: :after)
+    assert {:ok, %Mongo.FindAndModifyResult{value: value}} = Mongo.find_one_and_update(c.pid, coll, %{"foo" => 42}, %{"$set" => %{baz: 1}}, sort: %{"bar" => -1}, return_document: :after)
     assert %{"bar" => 10, "baz" => 1} = value, "Should respect the sort"
 
     # upsert
-    assert {:ok, value} = Mongo.find_one_and_update(c.pid, coll, %{"foo" => 43}, %{"$set" => %{baz: 1}}, upsert: true, return_document: :after)
+    assert {:ok, %Mongo.FindAndModifyResult{value: value}} = Mongo.find_one_and_update(c.pid, coll, %{"foo" => 43}, %{"$set" => %{baz: 1}}, upsert: true, return_document: :after)
     assert %{"foo" => 43, "baz" => 1} = value, "Should upsert"
 
     # array_filters
     assert {:ok, _} = Mongo.insert_one(c.pid, coll, %{foo: 44, things: [%{id: "123", name: "test"}, %{id: "456", name: "not test"}]})
-    assert {:ok, value} = Mongo.find_one_and_update(c.pid, coll, %{"foo" => 44}, %{"$set" => %{"things.$[sub].name" => "new"}}, array_filters: [%{"sub.id" => "123"}], return_document: :after)
+    assert {:ok, %Mongo.FindAndModifyResult{value: value}} = Mongo.find_one_and_update(c.pid, coll, %{"foo" => 44}, %{"$set" => %{"things.$[sub].name" => "new"}}, array_filters: [%{"sub.id" => "123"}], return_document: :after)
     assert %{"foo" => 44, "things" => [%{"id" => "123", "name" => "new"}, %{"id" => "456", "name" => "not test"}]} = value, "Should leverage array filters"
 
     # don't find return {:ok, nil}
-    assert {:ok, nil} == Mongo.find_one_and_update(c.pid, coll, %{"number" => 666}, %{"$set" => %{title: "the number of the beast"}})
+    assert {:ok, %Mongo.FindAndModifyResult{matched_count: 0, updated_existing: false, value: nil}} == Mongo.find_one_and_update(c.pid, coll, %{"number" => 666}, %{"$set" => %{title: "the number of the beast"}})
 
-    assert {:ok, nil} == Mongo.find_one_and_update(c.pid, "coll_that_doesnt_exist", %{"number" => 666}, %{"$set" => %{title: "the number of the beast"}})
+    assert {:ok, %Mongo.FindAndModifyResult{matched_count: 0, updated_existing: false, value: nil}} == Mongo.find_one_and_update(c.pid, "coll_that_doesnt_exist", %{"number" => 666}, %{"$set" => %{title: "the number of the beast"}})
 
     # wrong parameter
     assert {:error, %Mongo.Error{}} = Mongo.find_one_and_update(c.pid, 2, %{"number" => 666}, %{"$set" => %{title: "the number of the beast"}})
@@ -272,18 +272,18 @@ defmodule Mongo.Test do
     end
 
     # defaults
-    assert {:ok, value} = Mongo.find_one_and_replace(c.pid, coll, %{"foo" => 42}, %{bar: 2})
+    assert {:ok, %Mongo.FindAndModifyResult{value: value}} = Mongo.find_one_and_replace(c.pid, coll, %{"foo" => 42}, %{bar: 2})
     assert %{"foo" => 42, "bar" => 1} = value, "Should return original document by default"
 
     # return_document = :after
     assert {:ok, _} = Mongo.insert_one(c.pid, coll, %{foo: 43, bar: 1})
-    assert {:ok, value} = Mongo.find_one_and_replace(c.pid, coll, %{"foo" => 43}, %{bar: 3}, return_document: :after)
+    assert {:ok, %Mongo.FindAndModifyResult{value: value}} = Mongo.find_one_and_replace(c.pid, coll, %{"foo" => 43}, %{bar: 3}, return_document: :after)
     assert %{"bar" => 3} = value, "Should return modified doc"
     assert match?(%{"foo" => 43}, value) == false, "Should replace document"
 
     # projection
     assert {:ok, _} = Mongo.insert_one(c.pid, coll, %{foo: 44, bar: 1})
-    assert {:ok, value} = Mongo.find_one_and_replace(c.pid, coll, %{"foo" => 44}, %{foo: 44, bar: 3}, return_document: :after, projection: %{bar: 1})
+    assert {:ok, %Mongo.FindAndModifyResult{value: value}} = Mongo.find_one_and_replace(c.pid, coll, %{"foo" => 44}, %{foo: 44, bar: 3}, return_document: :after, projection: %{bar: 1})
     assert Map.get(value, "foo") == nil, "Should respect the projection"
 
     # sort
@@ -295,9 +295,12 @@ defmodule Mongo.Test do
 
     # upsert
     assert [] = Mongo.find(c.pid, coll, %{upsertedDocument: true}) |> Enum.to_list()
-    assert {:ok, value} = Mongo.find_one_and_replace(c.pid, coll, %{"upsertedDocument" => true}, %{"upsertedDocument" => true}, upsert: true, return_document: :after)
+    assert {:ok, %Mongo.FindAndModifyResult{value: value}} = Mongo.find_one_and_replace(c.pid, coll, %{"upsertedDocument" => true}, %{"upsertedDocument" => true}, upsert: true, return_document: :after)
     assert %{"upsertedDocument" => true} = value, "Should upsert"
     assert [%{"upsertedDocument" => true}] = Mongo.find(c.pid, coll, %{upsertedDocument: true}) |> Enum.to_list()
+
+    assert {:ok, %Mongo.FindAndModifyResult{matched_count: 0, updated_existing: false, value: nil}} == Mongo.find_one_and_replace(c.pid, coll, %{"never" => "matching"}, %{})
+    assert {:ok, %Mongo.FindAndModifyResult{matched_count: 0, updated_existing: false, value: nil}} == Mongo.find_one_and_replace(c.pid, "coll_that_doesnt_exist", %{"never" => "matching"}, %{})
   end
 
   test "find_one_and_delete", c do
@@ -320,6 +323,8 @@ defmodule Mongo.Test do
 
     assert {:ok, %{"note" => "delete"}} = Mongo.find_one_and_delete(c.pid, coll, %{foo: 50}, sort: %{bar: -1})
     assert [%{"note" => "keep"}] = Mongo.find(c.pid, coll, %{note: "keep"}) |> Enum.to_list()
+
+    assert {:ok, nil} = Mongo.find_one_and_delete(c.pid, coll, %{"never" => "matching"})
   end
 
   test "insert_one", c do
@@ -525,6 +530,24 @@ defmodule Mongo.Test do
     assert_raise Mongo.WriteError, fn ->
       Mongo.update_many!(c.pid, coll, %{foo: 0}, %{"$set": %{_id: 1}})
     end
+  end
+
+  test "update", c do
+    coll = unique_name()
+
+    assert {:ok, _} = Mongo.insert_many(c.pid, coll, [%{foo: 42}, %{foo: 42}, %{_id: 1}])
+
+    assert {:ok, %Mongo.UpdateResult{acknowledged: true, matched_count: 2, modified_count: 2, upserted_ids: []}} = Mongo.update(c.pid, coll, q: %{foo: 42}, update: %{"$set": %{foo: 0}}, multi: true)
+
+    assert {:ok, %Mongo.UpdateResult{acknowledged: true, matched_count: 0, modified_count: 0, upserted_ids: []}} == Mongo.update(c.pid, coll, [query: %{foo: 0}, update: %{}], w: 0)
+
+    assert {:ok, %Mongo.UpdateResult{acknowledged: true, matched_count: 1, modified_count: 0, upserted_ids: [%BSON.ObjectId{}]}} = Mongo.update(c.pid, coll, query: %{foo: 100}, update: %{foo: 24, flag: "new"}, upsert: true)
+
+    assert {:ok, %Mongo.UpdateResult{acknowledged: true, matched_count: 2, modified_count: 1, upserted_ids: [%BSON.ObjectId{}]}} =
+             Mongo.update(c.pid, coll, [[q: %{foo: 24}, update: %{flag: "old"}], [q: %{foo: 99}, update: %{luftballons: "yes"}, upsert: true]])
+
+    # message: "Write batch sizes must be between 1 and 100000. Got 0 operations."
+    assert {:error, %Mongo.Error{code: 16}} = Mongo.update(c.pid, coll, [])
   end
 
   # issue #19

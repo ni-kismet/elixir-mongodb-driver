@@ -17,7 +17,7 @@ defmodule Mongo.RepoTest do
   end
 
   setup do
-    assert {:ok, pid} = start_supervised({Mongo, MyRepo.config()})
+    assert {:ok, pid} = start_supervised(MyRepo)
     Mongo.drop_database(pid, nil, w: 3)
     {:ok, [pid: pid]}
   end
@@ -32,7 +32,6 @@ defmodule Mongo.RepoTest do
     end
   end
 
-  @tag :rs_required
   describe "transaction/3" do
     test "returns a single document for the given bson id" do
       assert :error =

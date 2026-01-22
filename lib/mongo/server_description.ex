@@ -1,12 +1,15 @@
 defmodule Mongo.ServerDescription do
   @moduledoc false
 
+  alias Mongo.Compressor
   alias Mongo.Version
 
   @retryable_wire_version Version.encode(:supports_op_msg)
 
   # see https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#serverdescription
   @type type :: :standalone | :mongos | :possible_primary | :rs_primary | :rs_secondary | :rs_arbiter | :rs_other | :rs_ghost | :unknown
+
+  @type compressor_types :: :zlib | :zstd
 
   @type t :: %{
           address: String.t() | nil,
@@ -30,10 +33,11 @@ defmodule Mongo.ServerDescription do
           max_bson_object_size: non_neg_integer,
           max_message_size_bytes: non_neg_integer,
           max_write_batch_size: non_neg_integer,
-          compression: String.t() | nil,
+          compression: [compressor_types],
           read_only: boolean(),
           logical_session_timeout: non_neg_integer,
-          supports_retryable_writes: boolean()
+          supports_retryable_writes: boolean(),
+          replica?: boolean()
         }
 
   @empty %{
@@ -58,10 +62,11 @@ defmodule Mongo.ServerDescription do
     max_bson_object_size: 16_777_216,
     max_message_size_bytes: 48_000_000,
     max_write_batch_size: 100_000,
-    compression: nil,
+    compression: [],
     read_only: false,
     logical_session_timeout: 30,
-    support_retryable_writes: false
+    support_retryable_writes: false,
+    replica?: false
   }
 
   def new() do
@@ -104,10 +109,11 @@ defmodule Mongo.ServerDescription do
       max_bson_object_size: hello_response["maxBsonObjectSize"] || 16_777_216,
       max_message_size_bytes: hello_response["maxMessageSizeBytes"] || 48_000_000,
       max_write_batch_size: hello_response["maxWriteBatchSize"] || 100_000,
-      compression: hello_response["compression"],
+      compression: Compressor.map_compressors(hello_response["compression"]),
       read_only: hello_response["readOnly"] || false,
       logical_session_timeout: hello_response["logicalSessionTimeoutMinutes"] || 30,
-      supports_retryable_writes: supports_retryable_writes
+      supports_retryable_writes: supports_retryable_writes,
+      replica?: replica?(server_type)
     }
   end
 
@@ -136,10 +142,11 @@ defmodule Mongo.ServerDescription do
       max_bson_object_size: hello_response["maxBsonObjectSize"] || 16_777_216,
       max_message_size_bytes: hello_response["maxMessageSizeBytes"] || 48_000_000,
       max_write_batch_size: hello_response["maxWriteBatchSize"] || 100_000,
-      compression: hello_response["compression"],
+      compression: Mongo.Compressor.map_compressors(hello_response["compression"]),
       read_only: hello_response["readOnly"] || false,
       logical_session_timeout: hello_response["logicalSessionTimeoutMinutes"] || 30,
-      supports_retryable_writes: server_type != :standalone && max_wire_version >= @retryable_wire_version && hello_response["logicalSessionTimeoutMinutes"] != nil
+      supports_retryable_writes: server_type != :standalone && max_wire_version >= @retryable_wire_version && hello_response["logicalSessionTimeoutMinutes"] != nil,
+      replica?: replica?(server_type)
     }
   end
 
@@ -159,4 +166,8 @@ defmodule Mongo.ServerDescription do
   end
 
   defp determine_server_type(_), do: :standalone
+
+  defp replica?(server_type) do
+    server_type in [:rs_primary, :rs_secondary, :rs_arbiter, :rs_other, :rs_ghost]
+  end
 end

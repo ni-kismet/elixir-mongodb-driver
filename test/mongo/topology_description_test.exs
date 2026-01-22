@@ -123,13 +123,26 @@ defmodule Mongo.TopologyDescriptionTest do
     assert Enum.any?(all_hosts, fn sec -> sec == server end)
   end
 
-  test "Simplified server selection" do
-    single_server = "localhost:27017"
-
+  test "Set topology type to :single when direct_connection option is true" do
     opts = [
-      read_preference: %{mode: :secondary}
+      direct_connection: true
     ]
 
-    assert {:ok, {^single_server, _}} = TopologyDescription.select_servers(single(), :read, opts)
+    assert :single = TopologyDescription.get_type(opts)
+
+    opts = [
+      type: :unknown,
+      direct_connection: true
+    ]
+
+    assert :single = TopologyDescription.get_type(opts)
+  end
+
+  test "Set read_preference to :primaryPreferred when topology is single and server is replica set" do
+    assert {:ok, {_, opts}} = TopologyDescription.select_servers(single(), :read, [])
+    assert nil == Keyword.get(opts, :read_preference)
+
+    assert {:ok, {_, opts}} = TopologyDescription.select_servers(single_with_repl_set(), :read, [])
+    assert :primaryPreferred = Keyword.get(opts, :read_preference) |> Map.get(:mode)
   end
 end

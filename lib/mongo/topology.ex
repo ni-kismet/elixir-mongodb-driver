@@ -79,7 +79,6 @@ defmodule Mongo.Topology do
     GenServer.call(pid, :get_state)
   end
 
-  # 97
   def select_server(pid, type, opts \\ []) do
     timeout = Keyword.get(opts, :checkout_timeout, @default_checkout_timeout)
     GenServer.call(pid, {:select_server, type, opts}, timeout)
@@ -109,7 +108,7 @@ defmodule Mongo.Topology do
   end
 
   def stop(pid) do
-    GenServer.stop(pid)
+    GenServer.stop(pid, :stop)
   end
 
   ## GenServer Callbacks
@@ -117,7 +116,7 @@ defmodule Mongo.Topology do
   # see https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#configuration
   def init(opts) do
     seeds = Keyword.get(opts, :seeds, [seed(opts)])
-    type = Keyword.get(opts, :type, :unknown)
+    type = TopologyDescription.get_type(opts)
     set_name = Keyword.get(opts, :set_name, nil)
     local_threshold_ms = Keyword.get(opts, :local_threshold_ms, 15)
 
@@ -163,14 +162,7 @@ defmodule Mongo.Topology do
     end
   end
 
-  def terminate(_reason, state) do
-    case state.opts[:pw_safe] do
-      nil -> nil
-      pid -> GenServer.stop(pid)
-    end
-
-    Enum.each(state.connection_pools, fn {_address, pid} -> GenServer.stop(pid) end)
-    Enum.each(state.monitors, fn {_address, pid} -> GenServer.stop(pid) end)
+  def terminate(_reason, _state) do
     Mongo.Events.notify(%TopologyClosedEvent{topology_pid: self()})
   end
 
@@ -204,18 +196,25 @@ defmodule Mongo.Topology do
   ##
   # In case of :monitor or :stream_monitor we mark the server description of the address as unknown
   ##
-  def handle_cast({:disconnect, kind, address}, state) when kind in [:monitor, :stream_monitor] do
-    server_description = ServerDescription.parse_hello_response(address, "#{inspect(kind)} disconnected")
+  def handle_cast({:disconnect, :monitor, address, pid}, state) do
+    server_description = ServerDescription.parse_hello_response(address, "monitor disconnected")
+    ## Logger.debug("Disconnect monitor with #{inspect(pid)}")
 
     new_state =
       address
-      |> remove_address(state)
+      |> close_connection_pool(pid, state)
       |> maybe_reinit()
 
     handle_cast({:server_description, server_description}, new_state)
   end
 
-  def handle_cast({:disconnect, _kind, _host}, state) do
+  def handle_cast({:disconnect, :stream_monitor, _host, _pid}, state) do
+    ## IO.inspect("ignored: kind stream_monitor with #{inspect pid}")
+    {:noreply, state}
+  end
+
+  def handle_cast({:disconnect, _kind, _host, _pid}, state) do
+    ## IO.inspect("ignored: kind #{inspect kind}")
     {:noreply, state}
   end
 
@@ -233,6 +232,7 @@ defmodule Mongo.Topology do
 
         {host, ^monitor_pid} ->
           arbiters = fetch_arbiters(state)
+          Mongo.Events.notify(%ServerOpeningEvent{address: host, topology_pid: self()})
 
           if host in arbiters do
             state
@@ -243,8 +243,9 @@ defmodule Mongo.Topology do
               |> Keyword.put(:topology_pid, self())
               |> connect_opts_from_address(host)
 
+            ## Logger.debug("Starting connection pool for #{inspect(host)}")
             {:ok, pool} = DBConnection.start_link(Mongo.MongoDBConnection, conn_opts)
-            connection_pools = Map.put(state.connection_pools, host, pool)
+            connection_pools = replace_pool(state.connection_pools, host, pool)
 
             Process.send_after(self(), {:new_connection, state.waiting_pids}, 10)
 
@@ -277,6 +278,49 @@ defmodule Mongo.Topology do
   def handle_info({:new_connection, waiting_pids}, state) do
     Enum.each(waiting_pids, fn from -> GenServer.reply(from, :new_connection) end)
     {:noreply, state}
+  end
+
+  ## remove the address only if the pid is the same
+  defp close_connection_pool(address, pid, state) do
+    ## Logger.debug("Closing connection pool by pid: #{inspect(state.monitors[address] == pid)}, #{inspect(pid)}, #{inspect(state.monitors[address])}")
+
+    case state.monitors[address] == pid do
+      true ->
+        Mongo.Events.notify(%ServerClosedEvent{address: address, topology_pid: self()})
+        ## stopping the connection pool
+        case state.connection_pools[address] do
+          nil ->
+            :ok
+
+          pid ->
+            if Process.alive?(pid) do
+              ## Logger.debug("Stopping the connection pool #{inspect(pid)} für #{inspect(address)}")
+              GenServer.stop(pid)
+            end
+        end
+
+        %{state | connection_pools: Map.delete(state.connection_pools, address)}
+
+      false ->
+        state
+    end
+  end
+
+  ## replaces a pool for the host address
+  defp replace_pool(connection_pools, host, pool) do
+    ## if we found an existing pool, we will stop it first
+    case Map.get(connection_pools, host) do
+      nil ->
+        :noop
+
+      pid ->
+        if Process.alive?(pid) do
+          ## Logger.debug("Stopping the connection pool #{inspect(pid)}")
+          GenServer.stop(pid)
+        end
+    end
+
+    Map.put(connection_pools, host, pool)
   end
 
   ##
@@ -373,7 +417,7 @@ defmodule Mongo.Topology do
   # checkout a new session
   #
   def handle_call({:checkout_session, read_write_type, opts}, from, %{:topology => topology, :waiting_pids => waiting} = state) do
-    opts = merge_read_preferences(opts, state.opts)
+    opts = merge_read_preferences(read_write_type, opts, state.opts)
 
     case TopologyDescription.select_servers(topology, read_write_type, opts) do
       :empty ->
@@ -402,7 +446,7 @@ defmodule Mongo.Topology do
   end
 
   def handle_call({:select_server, read_write_type, opts}, from, %{:topology => topology, :waiting_pids => waiting} = state) do
-    opts = merge_read_preferences(opts, state.opts)
+    opts = merge_read_preferences(read_write_type, opts, state.opts)
 
     case TopologyDescription.select_servers(topology, read_write_type, opts) do
       :empty ->
@@ -510,9 +554,6 @@ defmodule Mongo.Topology do
       Enum.reduce(added, state, fn address, state ->
         server_description = state.topology.servers[address]
         connopts = connect_opts_from_address(state.opts, address)
-
-        Mongo.Events.notify(%ServerOpeningEvent{address: address, topology_pid: self()})
-
         args = [server_description.address, self(), heartbeat_frequency_ms, Keyword.put(connopts, :pool, DBConnection.ConnectionPool)]
         {:ok, pid} = Monitor.start_link(args)
 
@@ -549,16 +590,23 @@ defmodule Mongo.Topology do
   end
 
   defp remove_address(address, state) do
-    Mongo.Events.notify(%ServerClosedEvent{address: address, topology_pid: self()})
-
     case state.monitors[address] do
-      nil -> :ok
-      pid -> GenServer.stop(pid)
+      nil ->
+        :ok
+
+      pid ->
+        Mongo.Events.notify(%ServerClosedEvent{address: address, topology_pid: self()})
+        ## Logger.debug("Stopping: #{inspect(pid)} for #{inspect(address)}")
+        GenServer.stop(pid)
     end
 
     case state.connection_pools[address] do
-      nil -> :ok
-      pid -> GenServer.stop(pid)
+      nil ->
+        :ok
+
+      pid ->
+        ## Logger.debug("Connection pool: #{inspect(address)}")
+        GenServer.stop(pid)
     end
 
     %{state | monitors: Map.delete(state.monitors, address), connection_pools: Map.delete(state.connection_pools, address)}
@@ -586,7 +634,7 @@ defmodule Mongo.Topology do
     Enum.flat_map(state.topology.servers, fn {_, s} -> s.arbiters end)
   end
 
-  defp merge_read_preferences(opts, url_opts) do
+  defp merge_read_preferences(:read, opts, url_opts) do
     case Keyword.get(url_opts, :read_preference) do
       nil ->
         opts
@@ -594,6 +642,10 @@ defmodule Mongo.Topology do
       read_preference ->
         Keyword.put_new(opts, :read_preference, read_preference)
     end
+  end
+
+  defp merge_read_preferences(:write, opts, _url_opts) do
+    Keyword.delete(opts, :read_preference)
   end
 
   defp merge_timeout(opts, default_ops) do

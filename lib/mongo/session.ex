@@ -62,6 +62,8 @@ defmodule Mongo.Session do
 
   For more information about causal consistency see the [officially documentation](https://docs.mongodb.com/manual/core/read-isolation-consistency-recency/#causal-consistency).
 
+  Note that Mongo.Stream implements the Enumerable protocol and the reduce/3 function calls Mongo.Stream.checkin_session/3 after the stream is exhausted.
+
   If you want to use transaction, then you need to create a session as well:
 
       alias Mongo.Session
@@ -391,9 +393,9 @@ defmodule Mongo.Session do
   end
 
   def init(topology, conn, address, server_session, wire_version, opts) do
-    ## in case of `:retryable_write` we need to inc the transaction id
+    ## in case of `:retryable_writes` we need to inc the transaction id
     server_session =
-      case opts[:retryable_write] do
+      case opts[:retryable_writes] do
         true -> ServerSession.next_txn_num(server_session)
         _ -> server_session
       end
@@ -481,7 +483,11 @@ defmodule Mongo.Session do
       |> ReadPreference.add_read_preference(opts)
       |> filter_nils()
 
-    client_opts = merge_timeout(client_opts, opts)
+    client_opts =
+      client_opts
+      |> merge_timeout(opts)
+      |> merge_compression(opts)
+
     {:keep_state_and_data, {:ok, conn, cmd, client_opts}}
   end
 
@@ -497,7 +503,11 @@ defmodule Mongo.Session do
       |> filter_nils()
       |> Keyword.drop(~w(writeConcern)a)
 
-    client_opts = merge_timeout(client_opts, opts)
+    client_opts =
+      client_opts
+      |> merge_timeout(opts)
+      |> merge_compression(opts)
+
     {:next_state, :transaction_in_progress, {:ok, conn, cmd, client_opts}}
   end
 
@@ -510,7 +520,11 @@ defmodule Mongo.Session do
       )
       |> Keyword.drop(~w(writeConcern readConcern)a)
 
-    client_opts = merge_timeout(client_opts, opts)
+    client_opts =
+      client_opts
+      |> merge_timeout(opts)
+      |> merge_compression(opts)
+
     {:keep_state_and_data, {:ok, conn, result, client_opts}}
   end
 
@@ -725,6 +739,16 @@ defmodule Mongo.Session do
 
       timeout ->
         Keyword.put_new(opts, :timeout, timeout)
+    end
+  end
+
+  defp merge_compression(opts, default_ops) do
+    case Keyword.get(default_ops, :compressor) do
+      nil ->
+        opts
+
+      compressor ->
+        Keyword.put(opts, :compressor, compressor)
     end
   end
 end

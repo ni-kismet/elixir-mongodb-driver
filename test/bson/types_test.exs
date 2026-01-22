@@ -11,21 +11,37 @@ defmodule BSON.TypesTest do
 
   @objectid %BSON.ObjectId{value: <<29, 32, 69, 244, 101, 119, 228, 28, 61, 24, 21, 215>>}
   @string "1d2045f46577e41c3d1815d7"
+  @string_uppercase "1D2045F46577E41C3D1815D7"
+  @timestamp DateTime.from_unix!(488_654_324)
 
   test "inspect BSON.ObjectId" do
     assert inspect(@objectid) == "#BSON.ObjectId<#{@string}>"
   end
 
-  test "BSON.ObjectId.encode!/1" do
-    assert BSON.ObjectId.encode!(@objectid) == @string
+  if Version.match?(System.version(), "<= 1.8.0") do
+    test "BSON.ObjectId.encode!/1" do
+      assert BSON.ObjectId.encode!(@objectid) == @string
 
-    assert_raise FunctionClauseError, fn ->
-      BSON.ObjectId.encode!("")
+      assert_raise FunctionClauseError, fn ->
+        BSON.ObjectId.encode!("")
+      end
+    end
+  else
+    test "BSON.ObjectId.encode!/1" do
+      assert BSON.ObjectId.encode!(@objectid) == @string
     end
   end
 
   test "BSON.ObjectId.decode!/1" do
     assert BSON.ObjectId.decode!(@string) == @objectid
+
+    assert_raise FunctionClauseError, fn ->
+      BSON.ObjectId.decode!("")
+    end
+  end
+
+  test "BSON.ObjectId.decode!/1 for uppercase HEX" do
+    assert BSON.ObjectId.decode!(@string_uppercase) == @objectid
 
     assert_raise FunctionClauseError, fn ->
       BSON.ObjectId.decode!("")
@@ -44,6 +60,28 @@ defmodule BSON.TypesTest do
 
   test "to_string BSON.ObjectId" do
     assert to_string(@objectid) == @string
+  end
+
+  if Version.match?(System.version(), "<= 1.8.0") do
+    test "BSON.ObjectId.get_timestamp!/1" do
+      value = BSON.ObjectId.get_timestamp!(@objectid)
+      assert DateTime.compare(value, @timestamp) == :eq
+
+      assert_raise FunctionClauseError, fn ->
+        BSON.ObjectId.get_timestamp!("")
+      end
+    end
+  else
+    test "BSON.ObjectId.get_timestamp!/1" do
+      value = BSON.ObjectId.get_timestamp!(@objectid)
+      assert DateTime.compare(value, @timestamp) == :eq
+    end
+  end
+
+  test "BSON.ObjectId.get_timestamp/1" do
+    assert {:ok, value} = BSON.ObjectId.get_timestamp(@objectid)
+    assert DateTime.compare(value, @timestamp) == :eq
+    assert BSON.ObjectId.get_timestamp("") == :error
   end
 
   test "inspect BSON.Regex" do

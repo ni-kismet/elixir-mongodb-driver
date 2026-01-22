@@ -10,6 +10,8 @@ defmodule Mongo.UrlParser do
 
   @mongo_url_regex ~r/^mongodb(?<srv>\+srv)?:\/\/(?:(?<username>[^:]+):(?<password>[^@]+)@)?(?<seeds>[^\/\?]+)(?:\/(?<database>[^?]*)?(?:\?(?<options>(?:[^\s=]+=[^\s&]*)+))?)?$/
 
+  @compressors Mongo.Compressor.compressors()
+
   # https://docs.mongodb.com/manual/reference/connection-string/#connections-connection-options
   @mongo_options %{
     # Path options
@@ -18,6 +20,7 @@ defmodule Mongo.UrlParser do
     "database" => :string,
     # Query options
     "replicaSet" => :string,
+    "directConnection" => ["true", "false"],
     "ssl" => ["true", "false"],
     "connectTimeoutMS" => :number,
     "socketTimeoutMS" => :number,
@@ -48,6 +51,7 @@ defmodule Mongo.UrlParser do
     "heartbeatFrequencyMS" => :number,
     "retryWrites" => ["true", "false"],
     "tls" => ["true", "false"],
+    "compressors" => @compressors,
     "uuidRepresentation" => ["standard", "csharpLegacy", "javaLegacy", "pythonLegacy"],
     # Elixir Driver options
     "type" => ["unknown", "single", "replicaSetNoPrimary", "sharded"]
@@ -60,6 +64,12 @@ defmodule Mongo.UrlParser do
   }
 
   defp parse_option_value(_key, ""), do: nil
+
+  defp parse_option_value("compressors", values) do
+    values
+    |> String.split(",")
+    |> Enum.filter(fn compressor -> compressor in @compressors end)
+  end
 
   defp parse_option_value(key, value) do
     case @mongo_options[key] do
@@ -105,7 +115,7 @@ defmodule Mongo.UrlParser do
 
         value = decode_percent(key, value)
 
-        Keyword.put(opts, @driver_option_map[key] || key, value)
+        Keyword.put_new(opts, @driver_option_map[key] || key, value)
     end
   end
 
@@ -142,8 +152,8 @@ defmodule Mongo.UrlParser do
          {:ok, {_, _, _, _, _, srv_record}} <-
            :inet_res.getbyname(~c"_mongodb._tcp." ++ url_char, :srv),
          {:ok, host} <- get_host_srv(srv_record),
-         {:ok, {_, _, _, _, _, txt_record}} <- :inet_res.getbyname(url_char, :txt),
-         txt <- "#{orig_options}&#{txt_record}&ssl=true" do
+         {:ok, txt_record} <- resolve_txt_record(url_char),
+         txt <- build_params(orig_options, txt_record) do
       frags
       |> Map.put("seeds", host)
       |> Map.put("options", txt)
@@ -153,6 +163,24 @@ defmodule Mongo.UrlParser do
   end
 
   defp resolve_srv_url(frags), do: frags
+
+  defp build_params(orig_options, nil) do
+    "#{orig_options}&ssl=true"
+  end
+
+  defp build_params(orig_options, txt_record) do
+    "#{orig_options}&#{txt_record}&ssl=true"
+  end
+
+  defp resolve_txt_record(url_char) do
+    case :inet_res.lookup(url_char, :in, :txt) do
+      [[txt_record] | _] ->
+        {:ok, txt_record}
+
+      _other ->
+        {:ok, nil}
+    end
+  end
 
   @spec get_host_srv([{term, term, term, term}]) :: {:ok, String.t()}
   defp get_host_srv(srv) when is_list(srv) do
@@ -168,7 +196,7 @@ defmodule Mongo.UrlParser do
 
       value ->
         ## start GenServer and put id
-        with {:ok, pid} <- Mongo.PasswordSafe.new(),
+        with {:ok, pid} <- Mongo.PasswordSafe.start_link(),
              :ok <- Mongo.PasswordSafe.set_password(pid, value) do
           opts
           |> Keyword.put(:password, "*****")

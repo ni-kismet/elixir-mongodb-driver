@@ -21,6 +21,9 @@ defmodule Mongo.MongoDBConnection do
 
   @impl true
   def connect(opts) do
+    # Trap exits so that DBConnection calls `disconnect` on unexpected shutdowns
+    Process.flag(:trap_exit, true)
+
     {write_concern, opts} = Keyword.split(opts, @write_concern)
     write_concern = Keyword.put_new(write_concern, :w, 1)
 
@@ -34,6 +37,7 @@ defmodule Mongo.MongoDBConnection do
       wire_version: 0,
       auth_mechanism: opts[:auth_mechanism] || nil,
       connection_type: Keyword.fetch!(opts, :connection_type),
+      server_pid: Keyword.get(opts, :server_pid),
       topology_pid: Keyword.fetch!(opts, :topology_pid),
       stable_api: Keyword.get(opts, :stable_api),
       use_op_msg: Keyword.get(opts, :stable_api) != nil,
@@ -45,8 +49,24 @@ defmodule Mongo.MongoDBConnection do
   end
 
   @impl true
-  def disconnect(_error, %{connection: {mod, socket}, connection_type: type, topology_pid: pid, host: host}) do
-    GenServer.cast(pid, {:disconnect, type, host})
+  ## the stream monitor disconnects, we change the mode of the parent monitor
+  def disconnect(_error, %{connection: {mod, socket}, connection_type: :stream_monitor, parent_pid: parent_pid}) do
+    ## Logger.debug("MongoDB-Connection: disconnected stream monitor: #{inspect(error)}")
+    GenServer.cast(parent_pid, :stop_streaming_mode)
+    mod.close(socket)
+    :ok
+  end
+
+  def disconnect(_error, %{connection: {mod, socket}, connection_type: :monitor, topology_pid: topology_pid, host: host, server_pid: server_pid}) do
+    ## Logger.debug("MongoDB-Connection: disconnected: #{inspect(error)}, #{inspect(server_pid)}, #{inspect(host)}, cast disconnect :monitor")
+    GenServer.cast(server_pid, :stop_streaming_mode)
+    GenServer.cast(topology_pid, {:disconnect, :monitor, host, server_pid})
+    mod.close(socket)
+    :ok
+  end
+
+  def disconnect(_error, %{connection: {mod, socket}}) do
+    ## Logger.debug("MongoDB-Connection: disconnected: #{inspect error}, #{inspect type}, #{inspect host} #{inspect server_pid}")
     mod.close(socket)
     :ok
   end
@@ -144,7 +164,13 @@ defmodule Mongo.MongoDBConnection do
 
   defp ssl(opts, %{connection: {:gen_tcp, socket}} = state) do
     host = (opts[:hostname] || "localhost") |> to_charlist
-    ssl_opts = Keyword.put_new(opts[:ssl_opts] || [], :server_name_indication, host)
+
+    # Do not set SNI for IP addresses
+    ssl_opts =
+      case :inet.parse_address(host) do
+        {:ok, _} -> opts[:ssl_opts]
+        _ -> Keyword.put_new(opts[:ssl_opts] || [], :server_name_indication, host)
+      end
 
     case :ssl.connect(socket, ssl_opts, state.connect_timeout) do
       {:ok, ssl_sock} ->
@@ -187,7 +213,7 @@ defmodule Mongo.MongoDBConnection do
   end
 
   defp hand_shake(opts, state) do
-    cmd = handshake_command(state, client(opts[:appname] || "elixir-driver"))
+    cmd = handshake_command(state, client(opts[:appname] || "elixir-driver"), Keyword.get(opts, :compressors, []))
 
     case Utils.command(-1, cmd, state) do
       {:ok, _flags, %{"ok" => ok, "maxWireVersion" => version} = response} when ok == 1 ->
@@ -316,14 +342,22 @@ defmodule Mongo.MongoDBConnection do
   defp send_command({:command, cmd}, opts, %{use_op_msg: true} = state) do
     {command_name, data} = provide_cmd_data(cmd)
     db = opts[:database] || state.database
+    compressor = opts[:compressor]
     cmd = cmd ++ ["$db": db]
     flags = Keyword.get(opts, :flags, 0x0)
 
     # MongoDB 3.6 only allows certain command arguments to be provided this way. These are:
     op =
       case pulling_out?(cmd, :documents) || pulling_out?(cmd, :updates) || pulling_out?(cmd, :deletes) do
-        nil -> op_msg(flags: flags, sections: [section(payload_type: 0, payload: payload(doc: cmd))])
-        key -> pulling_out(cmd, flags, key)
+        nil ->
+          if compressor != nil do
+            op_msg_compressed(flags: flags, sections: [section(payload_type: 0, payload: payload(doc: cmd))], compressor: compressor)
+          else
+            op_msg(flags: flags, sections: [section(payload_type: 0, payload: payload(doc: cmd))])
+          end
+
+        key ->
+          pulling_out(cmd, flags, key, compressor)
       end
 
     # overwrite temporary timeout by timeout option
@@ -401,14 +435,20 @@ defmodule Mongo.MongoDBConnection do
     end
   end
 
-  defp pulling_out(cmd, flags, key) when is_atom(key) do
+  defp pulling_out(cmd, flags, key, compressor) when is_atom(key) do
     docs = Keyword.get(cmd, key)
     cmd = Keyword.delete(cmd, key)
 
     payload_0 = section(payload_type: 0, payload: payload(doc: cmd))
     payload_1 = section(payload_type: 1, payload: payload(sequence: sequence(identifier: to_string(key), docs: docs)))
 
-    op_msg(flags: flags, sections: [payload_0, payload_1])
+    case compressor != nil do
+      false ->
+        op_msg(flags: flags, sections: [payload_0, payload_1])
+
+      true ->
+        op_msg_compressed(flags: flags, sections: [payload_0, payload_1], compressor: compressor)
+    end
   end
 
   defp flags(flags) do
@@ -418,12 +458,12 @@ defmodule Mongo.MongoDBConnection do
     end)
   end
 
-  defp handshake_command(%{stable_api: nil}, client) do
-    [ismaster: 1, helloOk: true, client: client]
+  defp handshake_command(%{stable_api: nil}, client, compression) do
+    [ismaster: 1, helloOk: true, client: client, compression: compression]
   end
 
-  defp handshake_command(%{stable_api: stable_api}, client) do
-    [client: client]
+  defp handshake_command(%{stable_api: stable_api}, client, compression) do
+    [client: client, compression: compression]
     |> StableVersion.merge_stable_api(stable_api)
     |> Keyword.put(:hello, 1)
   end

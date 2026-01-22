@@ -23,11 +23,11 @@ defmodule Mongo.Repo do
 
   For a complete list of configuration options take a look at `Mongo`.
 
-  Finally we can add the `Mongo` instance to our application supervision tree
+  Finally we can add the `Mongo.Repo` instance to our application supervision tree
 
       children = [
         # ...
-        {Mongo, MyApp.Repo.config()},
+        MyApp.Repo,
         # ...
       ]
 
@@ -58,6 +58,10 @@ defmodule Mongo.Repo do
         @otp_app
         |> Application.get_env(__MODULE__, [])
         |> Keyword.put_new(:name, @topology)
+      end
+
+      def child_spec(_opts) do
+        Mongo.child_spec(config())
       end
 
       unless @read_only do
@@ -176,45 +180,51 @@ defmodule Mongo.Repo do
       def all(module, filter \\ %{}, opts \\ []) do
         collection = module.__collection__(:collection)
 
-        @topology
-        |> Mongo.find(collection, filter, opts)
-        |> Enum.map(&module.load/1)
+        case Mongo.find(@topology, collection, filter, opts) do
+          {:error, _reason} = error -> error
+          cursor -> Enum.map(cursor, &module.load/1)
+        end
       end
 
       def stream(module, filter \\ %{}, opts \\ []) do
         collection = module.__collection__(:collection)
 
-        @topology
-        |> Mongo.find(collection, module.dump_part(filter), opts)
-        |> Stream.map(&module.load/1)
+        case Mongo.find(@topology, collection, module.dump_part(filter), opts) do
+          {:error, _reason} = error -> error
+          cursor -> Stream.map(cursor, &module.load/1)
+        end
       end
 
       def aggregate(module, pipeline, opts \\ []) do
         collection = module.__collection__(:collection)
 
-        @topology
-        |> Mongo.aggregate(collection, pipeline, opts)
-        |> Enum.map(&module.load/1)
+        case Mongo.aggregate(@topology, collection, pipeline, opts) do
+          {:error, _reason} = error -> error
+          cursor -> Enum.map(cursor, &module.load/1)
+        end
       end
 
       def get(module, id, opts \\ []) do
         collection = module.__collection__(:collection)
 
-        @topology
-        |> Mongo.find_one(collection, %{_id: id}, opts)
-        |> module.load()
+        case Mongo.find_one(@topology, collection, %{_id: id}, opts) do
+          {:error, _reason} = error -> error
+          value -> module.load(value)
+        end
       end
 
       def get_by(module, filter \\ %{}, opts \\ []) do
         collection = module.__collection__(:collection)
 
-        @topology
-        |> Mongo.find_one(collection, module.dump_part(filter), opts)
-        |> module.load()
+        case Mongo.find_one(@topology, collection, module.dump_part(filter), opts) do
+          {:error, _reason} = error -> error
+          value -> module.load(value)
+        end
       end
 
       def fetch(module, id, opts \\ []) do
         case get(module, id, opts) do
+          {:error, _reason} = error -> error
           nil -> {:error, :not_found}
           doc -> {:ok, doc}
         end
@@ -222,6 +232,7 @@ defmodule Mongo.Repo do
 
       def fetch_by(module, filter \\ %{}, opts \\ []) do
         case get_by(module, module.dump_part(filter), opts) do
+          {:error, _reason} = error -> error
           nil -> {:error, :not_found}
           doc -> {:ok, doc}
         end
@@ -297,7 +308,7 @@ defmodule Mongo.Repo do
       MyApp.Repo.all(Post, %{title: title}, batch_size: 2)
   """
   @callback all(module :: module(), filter :: BSON.document(), opts :: Keyword.t()) ::
-              list(Mongo.Collection.t())
+              list(Mongo.Collection.t()) | {:error, any()}
 
   @doc """
   Selects documents for the collection defined in the given module and returns a stream of collection
@@ -311,7 +322,7 @@ defmodule Mongo.Repo do
       MyApp.Repo.stream(Post, %{title: title}, batch_size: 2)
   """
   @callback stream(module :: module(), filter :: BSON.document(), opts :: Keyword.t()) ::
-              Enumerable.t()
+              Enumerable.t() | {:error, any()}
 
   @doc """
   Performs aggregation operation using the aggregation pipeline on the given collection module and returns
@@ -328,7 +339,7 @@ defmodule Mongo.Repo do
       ])
   """
   @callback aggregate(module :: module(), pipeline :: BSON.document(), opts :: Keyword.t()) ::
-              list(Mongo.Collection.t())
+              list(Mongo.Collection.t()) | {:error, any()}
 
   @doc """
   Returns the count of documents in the given collection module for the given filter.
@@ -366,7 +377,7 @@ defmodule Mongo.Repo do
       MyApp.Repo.update_all(Post, %{title: "old"}, %{"$set" => %{title: "updated"}})
   """
   @callback update_all(module :: module(), filter :: BSON.document(), update :: BSON.document(), opts :: Keyword.t()) ::
-              {:ok, Mongo.UpdateResult.t()}
+              {:ok, Mongo.result(Mongo.UpdateResult.t())}
 
   @doc """
   Deletes all documents for the given collection module and filter.
@@ -450,7 +461,7 @@ defmodule Mongo.Repo do
   @callback update(doc :: Mongo.Collection.t(), opts :: Keyword.t()) :: {:ok, Mongo.Collection.t()} | {:error, any()}
 
   @doc """
-  Same as `c:update/1` but raises an error.
+  Same as `c:update/2` but raises an error.
   """
   @callback update!(doc :: Mongo.Collection.t(), opts :: Keyword.t()) :: Mongo.Collection.t()
 
@@ -464,7 +475,7 @@ defmodule Mongo.Repo do
   @callback insert_or_update(doc :: Mongo.Collection.t(), opts :: Keyword.t()) :: {:ok, Mongo.Collection.t()} | {:error, any()}
 
   @doc """
-  Same as `c:insert_or_update/1` but raises an error.
+  Same as `c:insert_or_update/2` but raises an error.
   """
   @callback insert_or_update!(doc :: Mongo.Collection.t(), opts :: Keyword.t()) :: Mongo.Collection.t()
 

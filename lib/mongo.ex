@@ -71,9 +71,8 @@ defmodule Mongo do
   @type conn :: DbConnection.Conn
   @type collection :: String.t()
   @type cursor :: Mongo.Cursor.t()
-  @type result(t) :: :ok | {:ok, t} | {:error, Mongo.Error.t()} | {:error, Mongo.WriteError.t()}
+  @type result(t) :: {:ok, t} | {:error, Mongo.Error.t()} | {:error, Mongo.WriteError.t()}
   @type result!(t) :: t
-  @type initial_type :: :unknown | :single | :replica_set_no_primary | :sharded
 
   defmacrop bangify(result) do
     quote do
@@ -419,7 +418,19 @@ defmodule Mongo do
   end
 
   @doc """
-  Performs aggregation operation using the aggregation pipeline.
+  Performs aggregation operation using the aggregation pipeline and returns a Mongo.Stream.
+  It should be noted that code that uses the paginated query results without engaging Mongo.Streams Enumerable behavior
+  can result in the sessions hanging around and causing resource exhaustion.
+
+    Example:
+      # Results in an open session
+      %Mongo.Stream{docs: docs} = Mongo.aggregate(@topology, collection, pipeline, opts)
+      docs |> Enum.map(fn elem -> elem end)
+
+      # Results in a closed session via the Enumerable protocol
+      Mongo.aggregate(@topology, collection, pipeline, opts)
+      |> Enum.map(fn elem -> elem end)
+
 
   For all options see [Options](https://docs.mongodb.com/manual/reference/command/aggregate/#aggregate)
 
@@ -443,10 +454,9 @@ defmodule Mongo do
       |> filter_nils()
 
     opts =
-      Keyword.drop(
-        opts,
-        ~w(explain allow_disk_use collation bypass_document_validation hint comment read_concern)a
-      )
+      opts
+      |> Keyword.drop(~w(explain allow_disk_use collation bypass_document_validation hint comment read_concern)a)
+      |> Keyword.put_new(:compression, true)
 
     get_stream(topology_pid, cmd, opts)
   end
@@ -474,7 +484,7 @@ defmodule Mongo do
           BSON.document(),
           BSON.document(),
           Keyword.t()
-        ) :: result(BSON.document()) | {:ok, nil}
+        ) :: result(Mongo.FindAndModifyResult.t())
   def find_one_and_update(topology_pid, coll, filter, update, opts \\ []) do
     _ = modifier_docs(update, :update)
 
@@ -497,13 +507,18 @@ defmodule Mongo do
       |> filter_nils()
 
     opts =
-      Keyword.drop(
-        opts,
-        ~w(bypass_document_validation max_time projection return_document sort upsert collation w j wtimeout)a
-      )
+      opts
+      |> Keyword.drop(~w(bypass_document_validation max_time projection return_document sort upsert collation w j wtimeout)a)
+      |> Keyword.put_new(:compression, true)
 
     with {:ok, doc} <- issue_command(topology_pid, cmd, :write, opts) do
-      {:ok, doc["value"]}
+      {:ok,
+       %Mongo.FindAndModifyResult{
+         value: doc["value"],
+         matched_count: doc["lastErrorObject"]["n"],
+         updated_existing: doc["lastErrorObject"]["updatedExisting"],
+         upserted_id: doc["lastErrorObject"]["upserted"]
+       }}
     end
   end
 
@@ -531,7 +546,7 @@ defmodule Mongo do
           BSON.document(),
           BSON.document(),
           Keyword.t()
-        ) :: result(BSON.document())
+        ) :: result(Mongo.FindAndModifyResult.t())
   def find_one_and_replace(topology_pid, coll, filter, replacement, opts \\ []) do
     _ = modifier_docs(replacement, :replace)
 
@@ -554,12 +569,19 @@ defmodule Mongo do
       |> filter_nils()
 
     opts =
-      Keyword.drop(
-        opts,
-        ~w(bypass_document_validation max_time projection return_document sort upsert collation)a
-      )
+      opts
+      |> Keyword.drop(~w(bypass_document_validation max_time projection return_document sort upsert collation)a)
+      |> Keyword.put_new(:compression, true)
 
-    with {:ok, doc} <- issue_command(topology_pid, cmd, :write, opts), do: {:ok, doc["value"]}
+    with {:ok, doc} <- issue_command(topology_pid, cmd, :write, opts) do
+      {:ok,
+       %Mongo.FindAndModifyResult{
+         value: doc["value"],
+         matched_count: doc["lastErrorObject"]["n"],
+         updated_existing: doc["lastErrorObject"]["updatedExisting"],
+         upserted_id: doc["lastErrorObject"]["upserted"]
+       }}
+    end
   end
 
   defp should_return_new(:after), do: true
@@ -577,7 +599,7 @@ defmodule Mongo do
     * `:collation` - Optionally specifies a collation to use in MongoDB 3.4 and higher.
   """
   @spec find_one_and_delete(GenServer.server(), collection, BSON.document(), Keyword.t()) ::
-          result(BSON.document())
+          result(BSON.document()) | {:ok, nil}
   def find_one_and_delete(topology_pid, coll, filter, opts \\ []) do
     write_concern = write_concern(opts)
 
@@ -594,7 +616,10 @@ defmodule Mongo do
       ]
       |> filter_nils()
 
-    opts = Keyword.drop(opts, ~w(max_time projection sort collation)a)
+    opts =
+      opts
+      |> Keyword.drop(~w(max_time projection sort collation)a)
+      |> Keyword.put_new(:compression, true)
 
     with {:ok, doc} <- issue_command(topology_pid, cmd, :write, opts), do: {:ok, doc["value"]}
   end
@@ -613,7 +638,10 @@ defmodule Mongo do
       ]
       |> filter_nils()
 
-    opts = Keyword.drop(opts, ~w(limit skip hint collation)a)
+    opts =
+      opts
+      |> Keyword.drop(~w(limit skip hint collation)a)
+      |> Keyword.put_new(:compression, true)
 
     with {:ok, doc} <- issue_command(topology_pid, cmd, :read, opts) do
       {:ok, trunc(doc["n"])}
@@ -708,7 +736,10 @@ defmodule Mongo do
       ]
       |> filter_nils()
 
-    opts = Keyword.drop(opts, ~w(max_time)a)
+    opts =
+      opts
+      |> Keyword.drop(~w(max_time)a)
+      |> Keyword.put_new(:compression, true)
 
     with {:ok, doc} <- issue_command(topology_pid, cmd, :read, opts), do: {:ok, doc["values"]}
   end
@@ -770,7 +801,10 @@ defmodule Mongo do
 
     drop = ~w(limit hint single_batch read_concern max min collation return_key show_record_id tailable no_cursor_timeout await_data projection comment skip sort)a
 
-    opts = Keyword.drop(opts, drop)
+    opts =
+      opts
+      |> Keyword.drop(drop)
+      |> Keyword.put_new(:compression, true)
 
     try do
       get_stream(topology_pid, cmd, opts)
@@ -845,7 +879,7 @@ defmodule Mongo do
       ]
       |> filter_nils()
 
-    with {:ok, doc} <- issue_command(topology_pid, cmd, :write, opts) do
+    with {:ok, doc} <- issue_command(topology_pid, cmd, :write, Keyword.put_new(opts, :compression, true)) do
       case doc do
         %{"writeErrors" => _} ->
           {:error, %Mongo.WriteError{n: doc["n"], ok: doc["ok"], write_errors: doc["writeErrors"]}}
@@ -871,7 +905,7 @@ defmodule Mongo do
   @doc """
   Insert multiple documents into the collection.
 
-  If any of the documents is missing the `_id` field or it is `nil`, an ObjectId will be generated, and insertd into the document.
+  If any of the documents is missing the `_id` field or it is `nil`, an ObjectId will be generated, and inserted into the document.
   Ids of all documents will be returned in the result struct.
 
   ## Options
@@ -900,7 +934,7 @@ defmodule Mongo do
       ]
       |> filter_nils()
 
-    case issue_command(topology_pid, cmd, :write, opts) do
+    case issue_command(topology_pid, cmd, :write, Keyword.put_new(opts, :compression, true)) do
       {:ok, %{"writeErrors" => _} = doc} ->
         {:error, %Mongo.WriteError{n: doc["n"], ok: doc["ok"], write_errors: doc["writeErrors"]}}
 
@@ -976,7 +1010,7 @@ defmodule Mongo do
       ]
       |> filter_nils()
 
-    with {:ok, doc} <- issue_command(topology_pid, cmd, :write, opts) do
+    with {:ok, doc} <- issue_command(topology_pid, cmd, :write, Keyword.put_new(opts, :compression, true)) do
       case doc do
         %{"writeErrors" => _} ->
           {:error, %Mongo.WriteError{n: doc["n"], ok: doc["ok"], write_errors: doc["writeErrors"]}}
@@ -1094,6 +1128,112 @@ defmodule Mongo do
     bangify(update_many(topology_pid, coll, filter, update, opts))
   end
 
+  @doc """
+  Performs one or more update operations.
+
+  This function is especially useful for more complex update operations (e.g.
+  upserting multiple documents). For more straightforward use cases you may
+  prefer to use these higher level APIs:
+
+  * `update_one/5`
+  * `update_one!/5`
+  * `update_many/5`
+  * `update_many!5`
+
+  Each update in `updates` may be specified using either the short-hand
+  Mongo-style syntax (in reference to their docs) or using a long-hand, Elixir
+  friendly syntax.
+
+  See
+  https://docs.mongodb.com/manual/reference/command/update/#update-statements
+
+  e.g. long-hand `query` becomes short-hand `q`, snake case `array_filters`
+  becomes `arrayFilters`
+
+  Example:
+
+      Mongo.update(MongoPool,
+        "test_collection",
+        query: %{foo => 4},
+        update: %{"$set": %{"modified_field": "new_value"}},
+        multi: true)
+
+        Mongo.update(MongoPool,
+          "test_collection",
+          query: %{foo: 4},
+          update: %{foo: 5, new_field: "new_value"}},
+          upsert: true)
+
+        Mongo.update(MongoPool, "test_collection", [
+          [q: %{foo: 24}, update: %{flag: "old"}],
+          [q: %{foo: 99}, update: %{luftballons: "yes"}, upsert: true]
+        ])
+  """
+  @spec update(GenServer.server(), collection, [Keyword.t()], Keyword.t()) :: result(Mongo.UpdateResult.t())
+  def update(topology_pid, coll, updates, opts \\ [])
+
+  def update(topology_pid, coll, updates, opts) do
+    write_concern =
+      filter_nils(%{
+        w: Keyword.get(opts, :w),
+        j: Keyword.get(opts, :j),
+        wtimeout: Keyword.get(opts, :wtimeout)
+      })
+
+    normalised_updates = updates |> normalise_updates()
+
+    cmd =
+      [
+        update: coll,
+        updates: normalised_updates,
+        ordered: Keyword.get(opts, :ordered),
+        writeConcern: write_concern,
+        bypassDocumentValidation: Keyword.get(opts, :bypass_document_validation)
+      ]
+      |> filter_nils()
+
+    with {:ok, doc} <- issue_command(topology_pid, cmd, :write, Keyword.put_new(opts, :compression, true)) do
+      case doc do
+        %{"writeErrors" => write_errors} ->
+          {:error, %Mongo.WriteError{n: doc["n"], ok: doc["ok"], write_errors: write_errors}}
+
+        %{"n" => n, "nModified" => n_modified} ->
+          {:ok,
+           %Mongo.UpdateResult{
+             matched_count: n,
+             modified_count: n_modified,
+             upserted_ids: filter_upsert_ids(doc["upserted"])
+           }}
+
+        %{"ok" => ok} when ok == 1 ->
+          {:ok, %Mongo.UpdateResult{acknowledged: false}}
+      end
+    end
+  end
+
+  # maps list of updates (which are Keyword lists) to Mongo updates
+  defp normalise_updates([[{_key, _value} | _rest] | _updates] = updates) do
+    Enum.map(updates, &normalise_update/1)
+  end
+
+  # maps a single update (= Keyword list) to Mongo update
+  defp normalise_updates([{_key, _value} | _rest] = updates), do: normalise_updates([updates])
+
+  # let Mongo evaluate if this is correct input
+  defp normalise_updates(updates), do: updates
+
+  defp normalise_update(update) do
+    update
+    |> Enum.map(fn
+      {:query, query} -> {:q, query}
+      {:update, update} -> {:u, update}
+      {:updates, update} -> {:u, update}
+      {:array_filters, array_filters} -> {:arrayFilters, array_filters}
+      other -> other
+    end)
+    |> filter_nils()
+  end
+
   ##
   # Calls the update command:
   #
@@ -1124,7 +1264,7 @@ defmodule Mongo do
       ]
       |> filter_nils()
 
-    with {:ok, doc} <- issue_command(topology_pid, cmd, :write, opts) do
+    with {:ok, doc} <- issue_command(topology_pid, cmd, :write, Keyword.put_new(opts, :compression, true)) do
       case doc do
         %{"writeErrors" => _} ->
           {:error, %Mongo.WriteError{n: doc["n"], ok: doc["ok"], write_errors: doc["writeErrors"]}}
@@ -1181,7 +1321,7 @@ defmodule Mongo do
       Mongo.limits(top)
 
       {:ok, %{
-         compression: nil,
+         compression: [],
          logical_session_timeout: 30,
          max_bson_object_size: 16777216,
          max_message_size_bytes: 48000000,
@@ -1262,7 +1402,7 @@ defmodule Mongo do
       ]
       |> filter_nils()
 
-    with {:ok, _doc} <- issue_command(topology_pid, cmd, :write, opts) do
+    with {:ok, _doc} <- issue_command(topology_pid, cmd, :write, Keyword.put_new(opts, :compression, true)) do
       :ok
     end
   end
@@ -1477,7 +1617,10 @@ defmodule Mongo do
 
   def issue_command(topology_pid, cmd, :write, opts) do
     ## check, if retryable reads are enabled
-    opts = Mongo.retryable_writes(opts, acknowledged?(cmd[:writeConcerns]))
+    opts =
+      opts
+      |> Keyword.delete(:read_preferences)
+      |> Mongo.retryable_writes(acknowledged?(cmd[:writeConcerns]))
 
     case in_write_session(topology_pid, &exec_command_session(&1, cmd, &2), opts) do
       {:ok, doc} ->
@@ -1804,9 +1947,7 @@ defmodule Mongo do
 
     :telemetry.execute([:mongodb_driver, :execution], %{duration: duration}, metadata)
 
-    log = Application.get_env(:mongodb_driver, :log, false)
-
-    case Keyword.get(opts, :log, log) do
+    case Application.get_env(:mongodb_driver, :log, false) do
       true ->
         Logger.log(:info, fn -> log_iodata(command, collection, params, duration) end, ansi_color: command_color(command))
 
